@@ -6,7 +6,7 @@ On August 4, 2026, a malicious supply chain attack compromised keyv@6.0.0 and mu
 
 ## How to use
 
-Only for Linux
+Only for Linux, Raspberry Pi, Debian, etc
 
 scans machine for vulnerable keyv 6.0.0 on all npm dependencies (including transitive dependencies)
 
