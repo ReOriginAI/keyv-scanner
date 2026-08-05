@@ -72,10 +72,89 @@ while (($#)); do
   shift
 done
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "ERROR: node is required (npm projects imply Node.js, but node was not found)." >&2
+find_node() {
+  local candidate=""
+  local sudo_home=""
+
+  # An explicit absolute path is the most reliable way to carry a user-managed
+  # Node.js installation through sudo's restricted PATH.
+  if [[ -n "${NODE_BIN:-}" ]]; then
+    if [[ "$NODE_BIN" != /* ]]; then
+      echo "ERROR: NODE_BIN must be an absolute path: $NODE_BIN" >&2
+      return 1
+    fi
+    if [[ ! -x "$NODE_BIN" ]]; then
+      echo "ERROR: NODE_BIN is not executable: $NODE_BIN" >&2
+      return 1
+    fi
+    printf '%s\n' "$NODE_BIN"
+    return 0
+  fi
+
+  # First prefer a Node.js installation already visible to the current user.
+  if candidate="$(command -v node 2>/dev/null)" && [[ -n "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  if candidate="$(command -v nodejs 2>/dev/null)" && [[ -n "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  # Check conventional system locations even when sudo uses a minimal PATH.
+  for candidate in /usr/local/bin/node /usr/bin/node /bin/node \
+                   /usr/local/bin/nodejs /usr/bin/nodejs /bin/nodejs; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  # When invoked via sudo, look for the invoking user's version-manager install.
+  # This is deliberately limited to well-known Node.js locations rather than
+  # importing the user's entire PATH or shell startup files.
+  if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+    if command -v getent >/dev/null 2>&1; then
+      sudo_home="$(getent passwd "$SUDO_USER" 2>/dev/null | awk -F: 'NR == 1 { print $6 }')"
+    fi
+    if [[ -z "$sudo_home" ]]; then
+      sudo_home="${SUDO_HOME:-/home/$SUDO_USER}"
+    fi
+
+    for candidate in \
+      "$sudo_home/.volta/bin/node" \
+      "$sudo_home/.local/bin/node" \
+      "$sudo_home"/.nvm/versions/node/*/bin/node \
+      "$sudo_home"/.local/share/fnm/node-versions/*/installation/bin/node \
+      "$sudo_home"/.asdf/installs/nodejs/*/bin/node; do
+      if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+  fi
+
+  return 1
+}
+
+if ! NODE="$(find_node)"; then
+  cat >&2 <<'ERROR'
+ERROR: Node.js is required, but no usable node executable was found.
+
+When Node.js is installed only for your login user (for example through nvm), run:
+  NODE_BIN="$(command -v node)" sudo --preserve-env=NODE_BIN ./check-keyv-compromise.sh /
+
+On sudo configurations that reject --preserve-env, run:
+  sudo env NODE_BIN="$(command -v node)" ./check-keyv-compromise.sh /
+ERROR
   exit 3
 fi
+
+if ! "$NODE" --version >/dev/null 2>&1; then
+  echo "ERROR: the selected Node.js executable cannot run: $NODE" >&2
+  exit 3
+fi
+
 if [[ ! -d "$ROOT" ]]; then
   echo "ERROR: scan root is not a directory: $ROOT" >&2
   exit 3
@@ -85,6 +164,8 @@ TMP_DIR="$(mktemp -d)" || exit 3
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
 FILE_LIST="$TMP_DIR/files.nul"
 FIND_ERRORS="$TMP_DIR/find-errors.log"
+
+echo "Using Node.js: $NODE ($("$NODE" --version 2>/dev/null))"
 
 # Do not descend into virtual kernel filesystems or VCS metadata. We still
 # descend into node_modules because keyv can be nested/transitive.
@@ -103,7 +184,7 @@ find "$ROOT" \
   >"$FILE_LIST" 2>"$FIND_ERRORS"
 FIND_STATUS=$?
 
-node - "$BAD_VERSION" "$FILE_LIST" <<'NODE'
+"$NODE" - "$BAD_VERSION" "$FILE_LIST" <<'NODE'
 'use strict';
 
 const fs = require('fs');
