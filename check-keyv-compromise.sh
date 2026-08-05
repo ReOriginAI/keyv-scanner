@@ -1,8 +1,76 @@
 #!/usr/bin/env bash
 set -u
 
-ROOT="${1:-/}"
 BAD_VERSION="${BAD_VERSION:-6.0.0}"
+MODE="best-effort"
+ROOT="/"
+ROOT_SET=0
+
+usage() {
+  cat <<'USAGE'
+Usage: check-keyv-compromise.sh [--best-effort|--strict] [SCAN_ROOT]
+
+Scans readable npm manifests, lockfiles, and installed keyv packages below
+SCAN_ROOT (default: /) for the compromised keyv version.
+
+Options:
+  --best-effort  Finish the scan despite permission/read errors and return 0
+                 when no compromised or risky reference is found. This is the
+                 default. Coverage gaps are still reported prominently.
+  --strict       Return 2 when any path or relevant file could not be checked.
+  -h, --help     Show this help.
+
+Exit status:
+  0  No compromised/risky reference found in the data that was readable
+  1  Compromised version or unsafe/unverifiable declaration found
+  2  Strict mode only: scan completed with coverage gaps
+  3  Invalid invocation, missing dependency, or fatal scanner error
+USAGE
+}
+
+while (($#)); do
+  case "$1" in
+    --best-effort)
+      MODE="best-effort"
+      ;;
+    --strict)
+      MODE="strict"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      while (($#)); do
+        if ((ROOT_SET)); then
+          echo "ERROR: only one scan root may be specified." >&2
+          usage >&2
+          exit 3
+        fi
+        ROOT="$1"
+        ROOT_SET=1
+        shift
+      done
+      break
+      ;;
+    -*)
+      echo "ERROR: unknown option: $1" >&2
+      usage >&2
+      exit 3
+      ;;
+    *)
+      if ((ROOT_SET)); then
+        echo "ERROR: only one scan root may be specified." >&2
+        usage >&2
+        exit 3
+      fi
+      ROOT="$1"
+      ROOT_SET=1
+      ;;
+  esac
+  shift
+done
 
 if ! command -v node >/dev/null 2>&1; then
   echo "ERROR: node is required (npm projects imply Node.js, but node was not found)." >&2
@@ -295,8 +363,12 @@ if (incomplete.length) {
   for (const item of incomplete) console.error(`  ${item}`);
 }
 
-if (!confirmed.size && !risky.size && !incomplete.length) {
-  console.log(`No reference to compromised keyv@${BAD} was found.`);
+if (!confirmed.size && !risky.size) {
+  if (incomplete.length) {
+    console.log(`\nNo reference to compromised keyv@${BAD} was found among readable files.`);
+  } else {
+    console.log(`No reference to compromised keyv@${BAD} was found.`);
+  }
 }
 
 if (confirmed.size || risky.size) process.exit(1);
@@ -305,17 +377,52 @@ process.exit(0);
 NODE
 SCAN_STATUS=$?
 
+COVERAGE_GAPS=0
+
 if [[ -s "$FIND_ERRORS" ]]; then
+  COVERAGE_GAPS=1
   echo >&2
-  echo "Some filesystem paths could not be searched:" >&2
+  echo "Filesystem paths that could not be searched (scan continued):" >&2
   sed 's/^/  /' "$FIND_ERRORS" >&2
 fi
 
-# 1 = compromised/risky; 2 = incomplete scan; 0 = clean and complete.
+if [[ $FIND_STATUS -ne 0 || $SCAN_STATUS -eq 2 ]]; then
+  COVERAGE_GAPS=1
+fi
+
+# A detection always wins, even when other paths were unreadable.
 if [[ $SCAN_STATUS -eq 1 ]]; then
+  if ((COVERAGE_GAPS)); then
+    echo >&2
+    echo "WARNING: Findings were detected, and some paths also could not be checked." >&2
+  fi
   exit 1
 fi
-if [[ $SCAN_STATUS -eq 2 || $FIND_STATUS -ne 0 || -s "$FIND_ERRORS" ]]; then
-  exit 2
+
+# Any unexpected Node/scanner failure is fatal rather than being hidden by
+# best-effort mode.
+if [[ $SCAN_STATUS -ne 0 && $SCAN_STATUS -ne 2 ]]; then
+  echo "ERROR: the manifest scanner failed with status $SCAN_STATUS." >&2
+  exit 3
 fi
+
+if ((COVERAGE_GAPS)); then
+  echo >&2
+  if [[ "$MODE" == "strict" ]]; then
+    echo "SCAN FINISHED WITH COVERAGE GAPS (STRICT MODE)." >&2
+  else
+    echo "BEST-EFFORT SCAN FINISHED WITH COVERAGE GAPS." >&2
+  fi
+  echo "No compromised keyv@${BAD_VERSION} reference was found in readable data," >&2
+  echo "but unreadable paths/files were not verified." >&2
+
+  if [[ "$MODE" == "strict" ]]; then
+    exit 2
+  fi
+
+  echo "Best-effort mode: returning success so permission gaps do not stop the workflow." >&2
+  exit 0
+fi
+
+echo "Scan finished with full readable coverage below: $ROOT"
 exit 0
